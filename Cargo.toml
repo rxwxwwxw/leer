@@ -1,0 +1,38 @@
+[package]
+name = "NG-Reader"
+version = "0.1.0"
+edition = "2024"
+default-run = "NG-Reader"
+
+[profile.release]
+opt-level = 3
+lto = true        # Link-Time Optimization across crates
+codegen-units = 1 # Reduces parallelism during compilation but optimizes better
+panic = "abort"   # Shrinks binary size by removing unwinding code
+
+
+[dependencies]
+anyhow = "1.0.104"
+deadpool = "0.13.0"
+deadpool-sqlite = "0.13.0"
+model2vec-rs = { version= "0.2.1", features=["local-only", "onig"]}
+rusqlite = { version = "0.38", features=["bundled"]}
+serde =  { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sqlite-vec = "0.1.9"
+clap = { version = "4.5", features = ["derive"] }
+zerocopy = "0.8.56"
+zerocopy-derive = "0.8.56"
+tokio = { version = "1.0", features = ["full"] }
+actix-web = "4.14.1"
+maud = { version = "0.27", features = ["actix-web"] }
+urlencoding = "2.1"
+actix-files = "0.6.10"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+argon2 = "0.5.3"
+actix-identity = "0.9.0"
+actix-session = { version = "0.11", features = ["cookie-session"] }
+password-hash = "0.6.1"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+dotenvy = "0.15.7"
