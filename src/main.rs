@@ -6,7 +6,6 @@ use actix_web::{cookie::Key, web, App, HttpServer};
 use anyhow::Result;
 use deadpool_sqlite::{Config, Runtime};
 use dotenvy::dotenv;
-use model2vec_rs::model::StaticModel;
 use std::env;
 use std::sync::Arc;
 
@@ -14,8 +13,6 @@ use NG_Reader::{
     app_state::AppState,
     db::schema::initialize_user_schema,
     db::stories::StoryRepository,
-    embeddings::abtt::AbttTransformer,
-    init_sqlite_extensions,
     routes,
 };
 
@@ -24,7 +21,6 @@ async fn main() -> Result<()> {
     // Load local .env file if it exists (silent fallback if missing in production environments)
     let _ = dotenv();
 
-    init_sqlite_extensions();
 
     // 1. Dynamic Environment Configurations
     let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
@@ -38,7 +34,6 @@ async fn main() -> Result<()> {
 
     let stories_db_path = env::var("STORIES_DB_URL").unwrap_or_else(|_| "file:stories.db?mode=ro".to_string());
     let users_db_path = env::var("USERS_DB_URL").unwrap_or_else(|_| "users.db".to_string());
-    let model_dir = env::var("MODEL_DIR").unwrap_or_else(|_| "./m2v_distilled".to_string());
 
     // 2. Secret key for encrypted session cookies
     // In local dev, fallback to a static string. In production, require or fetch a persistent secret key.
@@ -59,20 +54,18 @@ async fn main() -> Result<()> {
 
     // 5. Initial context extraction
     let init_conn = stories_pool.get().await?;
-    let (abtt, popular_tags, max_story_id) = init_conn.interact(|conn| -> Result<_> {
-        let abtt = AbttTransformer::from_db(conn)?;
-        let mut tags = StoryRepository::get_popular_tags(conn, 1000)?;
+    let (popular_tags, max_story_id) = init_conn.interact(|conn| -> Result<_> {
+        let mut tags = StoryRepository::get_popular_tags(conn, 1)?;
         tags.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         let max_id: i64 = conn.query_row(
             "SELECT COALESCE(MAX(id), 1) FROM stories_metadata",
                                          [],
                                          |r| r.get(0),
         )?;
-        Ok((abtt, tags, max_id))
+        Ok((tags, max_id))
     }).await.unwrap()?;
 
     // 6. Static Embeddings Model Load
-    let model = StaticModel::from_pretrained(&model_dir, None, None, None)?;
 
     // Read and sanitize BASE_PATH (e.g. "/device2" or "")
     let raw_base = env::var("BASE_PATH").unwrap_or_default();
@@ -99,8 +92,6 @@ async fn main() -> Result<()> {
         base_path: base_path.clone(),
                                    stories_pool,
                                    users_pool,
-                                   model: Arc::new(model),
-                                   abtt,
                                    popular_tags: Arc::new(popular_tags),
                                    max_story_id,
     });

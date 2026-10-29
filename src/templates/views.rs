@@ -128,7 +128,7 @@ fn search_form_component(base_path: &str, q: &SearchPageQuery, tags: &[TagCount]
             }
 
             div class="search-subline" {
-                span { "Hybrid lexical + semantic search" }
+                span { "Lexical search" }
                 span class="search-subline-separator" { "•" }
                 span { "Press " kbd { "/" } " to focus search" }
             }
@@ -370,7 +370,7 @@ pub fn search_query_template(base_path: &str, tags: &[TagCount], query: &SearchP
     let section_header = html! {
         div class="page-title-block" {
             h2 { "Story Archive Search" }
-            p class="subtitle" { "Fast hybrid search across titles, authors, story text, tags, and semantic similarity." }
+            p class="subtitle" { "Search across titles, authors, story text, and tags." }
         }
     };
     let content = html! {

@@ -25,7 +25,10 @@ pub async fn story_page(
             Some(res) => res,
               None => return Ok(None),
         };
-        let mut related = StoryRepository::fetch_by_ids(conn, &related_ids)?;
+        let ids: Vec<i64> = related_ids.iter().map(|(id, _)| *id).collect();
+        let scores: std::collections::HashMap<i64, f32> = related_ids.into_iter().collect();
+        let mut related = StoryRepository::fetch_by_ids(conn, &ids)?;
+        for story in &mut related { story.score = scores.get(&story.id).copied(); }
         related.sort_by(|a, b| {
             display_story_title(&a.title)
                 .to_lowercase()

@@ -28,8 +28,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         readers INTEGER,
         upvotes INTEGER,
         downvotes INTEGER,
-        timestamp REAL,
-        nearest_blob BLOB
+        timestamp REAL
     );
     CREATE TABLE IF NOT EXISTS stories_content (
         story_id INTEGER PRIMARY KEY,
@@ -45,9 +44,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         keyword_id INTEGER NOT NULL,
         PRIMARY KEY (story_id, keyword_id)
     );
-    CREATE TABLE IF NOT EXISTS model_transform_params (
-        key TEXT PRIMARY KEY,
-        vector BLOB NOT NULL
+    CREATE TABLE IF NOT EXISTS story_related (
+        story_id INTEGER NOT NULL,
+        related_id INTEGER NOT NULL,
+        score REAL NOT NULL,
+        position INTEGER NOT NULL,
+        PRIMARY KEY (story_id, related_id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_story_tags_tag_id ON story_tags(tag_id);
@@ -81,11 +83,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         title,
         author,
         tokenize = 'trigram'
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS vec_stories USING vec0(
-        story_id INTEGER PRIMARY KEY,
-        embedding float[256]
-    );",
+    )",
     )?;
     Ok(())
 }

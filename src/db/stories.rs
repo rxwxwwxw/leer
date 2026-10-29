@@ -48,10 +48,10 @@ impl StoryRepository {
         Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
-    pub fn get_detail(conn: &Connection, story_id: i64) -> Result<Option<(StoryDetail, Vec<i64>)>> {
+    pub fn get_detail(conn: &Connection, story_id: i64) -> Result<Option<(StoryDetail, Vec<(i64, f32)>)>> {
         let sql = r#"
         SELECT m.id, m.title, a.name, COALESCE(strftime('%Y-%m-%d', datetime(m.timestamp, 'unixepoch')), 'Unknown date'),
-        COALESCE(m.upvotes, 0), COALESCE(m.downvotes, 0), COALESCE(m.readers, 0), c.content, m.nearest_blob,
+        COALESCE(m.upvotes, 0), COALESCE(m.downvotes, 0), COALESCE(m.readers, 0), c.content,
         (SELECT GROUP_CONCAT(t.name, ', ') FROM story_tags st JOIN tags t ON st.tag_id = t.id WHERE st.story_id = m.id),
         (SELECT GROUP_CONCAT(k.name, ', ') FROM story_keywords sk JOIN keywords k ON sk.keyword_id = k.id WHERE sk.story_id = m.id),
         m.introduction
@@ -72,19 +72,17 @@ impl StoryRepository {
                                       downvotes: r.get(5)?,
                                       readers: r.get(6)?,
                                       content: r.get(7)?,
-                                      tags: r.get(9)?,
-                                      keywords: r.get(10)?,
-                                      introduction: r.get(11)?,
+                                      tags: r.get(8)?,
+                                      keywords: r.get(9)?,
+                                      introduction: r.get(10)?,
             };
-            let blob: Option<Vec<u8>> = r.get(8)?;
-            Ok((detail, blob))
+            Ok(detail)
         })?;
 
         if let Some(res) = rows.next() {
-            let (detail, blob) = res?;
-            let related_ids = blob
-            .map(|b| b.chunks_exact(8).map(|c| i64::from_ne_bytes(c.try_into().unwrap())).take(40).collect())
-            .unwrap_or_default();
+            let detail = res?;
+            let mut related_stmt = conn.prepare("SELECT related_id, score FROM story_related WHERE story_id = ?1 ORDER BY position")?;
+            let related_ids = related_stmt.query_map([story_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(Some((detail, related_ids)))
         } else {
             Ok(None)

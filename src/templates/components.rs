@@ -17,6 +17,9 @@ pub fn related_story_card(base_path: &str, story: &StorySummary) -> Markup {
                     span class="related-meta" { " · " (readers) " readers" }
                 }
             }
+            @if let Some(score) = story.score {
+                span class="related-meta" { "Similarity " (format!("{:.3}", score)) }
+            }
             @if let Some(tags) = &story.tags {
                 div class="pills-container" {
                     @for tag in tags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).take(3) {

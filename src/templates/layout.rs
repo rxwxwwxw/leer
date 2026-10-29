@@ -69,7 +69,7 @@ pub fn base_layout(
                 footer class="site-footer" {
                     div class="footer-inner" {
                         @if let Some(f) = footer { (f) }
-                        p class="footer-text" { "Powered by Actix, Maud & SQLite Vector Search" }
+                        p class="footer-text" { "Powered by Actix, Maud & SQLite" }
                     }
                 }
             }

@@ -8,11 +8,9 @@ use crate::search::builder::{build_where_filters, parse_csv};
 use anyhow::{anyhow, Result};
 use rusqlite::types::ToSql;
 use std::collections::HashSet;
-use zerocopy::IntoBytes;
 
 const PORTER_WEIGHT: f32 = 1.0;
 const TRIGRAM_WEIGHT: f32 = 0.45;
-const VECTOR_WEIGHT: f32 = 0.75;
 const PROXIMITY_WEIGHT: f32 = 1.20;
 const PHRASE_WEIGHT: f32 = 1.40;
 const EXACT_TITLE_BONUS: f32 = 0.03;
@@ -128,9 +126,6 @@ fn max_score_for_scope(scope: SearchScope, has_proximity: bool, has_trigram: boo
     let mut score = PORTER_WEIGHT / 61.0 + PHRASE_WEIGHT / 41.0;
     if has_trigram {
         score += TRIGRAM_WEIGHT / 21.0;
-    }
-    if scope != SearchScope::Title {
-        score += VECTOR_WEIGHT / 61.0;
     }
     if has_proximity {
         score += PROXIMITY_WEIGHT / 61.0;
@@ -314,17 +309,6 @@ pub async fn execute_search(
         return execute_filter_only_search(conn, query_params, sort_order, offset, page_size).await;
     }
 
-    // Hybrid retrieval: lexical Porter FTS, shared-trigram fuzzy candidates
-    // for title/author metadata, semantic vector search, exact-phrase ranking,
-    // and a local proximity boost.
-    let embeddings = state.model.encode(&[raw_q.to_string()]);
-    let raw_embedding = match embeddings.into_iter().next() {
-        Some(e) => e,
-        None => return Ok((SearchResultPayload::Stories(vec![]), 0)),
-    };
-    let final_embedding = state.abtt.transform(raw_embedding);
-    let embedding_bytes = final_embedding.as_bytes().to_vec();
-
     let fts_query = apply_scope(&sanitize_fts(raw_q), scope);
     let phrase_query = apply_scope(&sanitize_phrase(raw_q), scope);
     let trigram_query = build_trigram_query(raw_q, scope);
@@ -340,7 +324,6 @@ pub async fn execute_search(
 
     let use_trigram = scope != SearchScope::Content && trigram_query.is_some();
     let max_score = max_score_for_scope(scope, has_proximity, use_trigram);
-    let use_vector = scope != SearchScope::Title;
     let use_title_bonus = scope != SearchScope::Content;
 
     let (results, total) = conn
@@ -348,7 +331,7 @@ pub async fn execute_search(
             let mut sql_params: Vec<Box<dyn ToSql>> = vec![
                 Box::new(fts_query),
                 Box::new(trigram_query.unwrap_or_else(|| "\"__no_trigram__\"".to_string())),
-                Box::new(embedding_bytes),
+                Box::new(0_i64),
                 Box::new(proximity_query.unwrap_or_else(|| "\"__no_proximity__\"".to_string())),
                 Box::new(raw_query_for_bonus),
                 Box::new(phrase_query),
@@ -406,16 +389,6 @@ pub async fn execute_search(
             } else {
                 "SELECT NULL AS story_id WHERE 0".to_string()
             };
-            let vector_cte = if use_vector && has_positive_tag_gate {
-                // vec0 KNN LIMIT is global. For a gated search, explicitly score
-                // vectors from the tag pool so the 400-vector candidate budget is
-                // spent inside the gate rather than filtered after global KNN.
-                "SELECT vec_stories.story_id FROM vec_stories JOIN tag_pool tp ON tp.story_id = vec_stories.story_id ORDER BY vec_distance_cosine(vec_stories.embedding, ?3) LIMIT 400".to_string()
-            } else if use_vector {
-                "SELECT story_id FROM vec_stories WHERE embedding MATCH ?3 ORDER BY distance LIMIT 400".to_string()
-            } else {
-                "SELECT NULL AS story_id WHERE 0".to_string()
-            };
             let proximity_cte = if has_proximity {
                 format!(
                     "SELECT stories_fts.rowid AS story_id FROM stories_fts {} WHERE stories_fts MATCH ?4 ORDER BY bm25(stories_fts) LIMIT 300",
@@ -468,12 +441,6 @@ pub async fn execute_search(
                 trigram_candidates AS (
                     SELECT story_id, ROW_NUMBER() OVER () AS rank_num FROM trigram_raw
                 ),
-                vec_raw AS (
-                    {vector_cte}
-                ),
-                vec_candidates AS (
-                    SELECT story_id, ROW_NUMBER() OVER () AS rank_num FROM vec_raw
-                ),
                 proximity_raw AS (
                     {proximity_cte}
                 ),
@@ -495,8 +462,6 @@ pub async fn execute_search(
                     SELECT story_id, ({porter_weight} / (60.0 + rank_num)) AS score FROM porter_candidates
                     UNION ALL
                     SELECT story_id, ({trigram_weight} / (20.0 + rank_num)) AS score FROM trigram_candidates
-                    UNION ALL
-                    SELECT story_id, ({vector_weight} / (60.0 + rank_num)) AS score FROM vec_candidates
                     UNION ALL
                     SELECT story_id, ({proximity_weight} / (60.0 + rank_num)) AS score FROM proximity_candidates
                     UNION ALL
@@ -528,7 +493,6 @@ pub async fn execute_search(
                 "#,
                 porter_weight = PORTER_WEIGHT,
                 trigram_weight = TRIGRAM_WEIGHT,
-                vector_weight = VECTOR_WEIGHT,
                 proximity_weight = PROXIMITY_WEIGHT,
                 phrase_weight = PHRASE_WEIGHT,
             );

@@ -20,8 +20,7 @@ CREATE TABLE stories_metadata(
   readers INTEGER,
   upvotes INTEGER,
   downvotes INTEGER,
-  timestamp REAL,
-  nearest_blob BLOB
+  timestamp REAL
 );
 CREATE TABLE stories_content(
   story_id INTEGER PRIMARY KEY,
@@ -88,32 +87,12 @@ CREATE TABLE 'trigram_fts_idx'(
 CREATE TABLE 'trigram_fts_content'(id INTEGER PRIMARY KEY, c0, c1);
 CREATE TABLE 'trigram_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
 CREATE TABLE 'trigram_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-CREATE VIRTUAL TABLE vec_stories USING vec0(
-  story_id INTEGER PRIMARY KEY,
-  embedding float[256]
-);
-CREATE TABLE "vec_stories_info"(key text primary key, value any);
-CREATE TABLE "vec_stories_chunks"(
-  chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  size INTEGER NOT NULL,
-  validity BLOB NOT NULL,
-  rowids BLOB NOT NULL
-);
-CREATE TABLE "vec_stories_rowids"(
-  rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-  id,
-  chunk_id INTEGER,
-  chunk_offset INTEGER
-);
-CREATE TABLE "vec_stories_vector_chunks00"(
-  rowid PRIMARY KEY,
-  vectors BLOB NOT NULL
-);
-CREATE TABLE sqlite_stat1(tbl,idx,stat);
-CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample);
-CREATE TABLE model_transform_params(
-  key TEXT PRIMARY KEY,
-  vector BLOB NOT NULL
+CREATE TABLE story_related (
+  story_id INTEGER NOT NULL,
+  related_id INTEGER NOT NULL,
+  score REAL NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(story_id, related_id)
 );
 CREATE INDEX idx_story_tags_tag_id ON story_tags(tag_id);
 CREATE INDEX idx_story_keywords_kw_id ON story_keywords(keyword_id);
