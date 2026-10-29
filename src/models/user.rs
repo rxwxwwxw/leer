@@ -9,13 +9,6 @@ pub struct User {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct RegisterForm {
-    pub username: String,
-    pub password: String,
-    pub confirm_password: String,
-}
-
-#[derive(Deserialize, Debug)]
 pub struct LoginForm {
     pub username: String,
     pub password: String,

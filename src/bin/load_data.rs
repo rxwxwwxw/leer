@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::{fs::File, io::{BufRead, BufReader}, path::PathBuf};
 use NG_Reader::db::schema::initialize_schema;
+use NG_Reader::utils::sample_key;
 
 #[derive(Parser)]
 struct Args {
@@ -68,7 +69,7 @@ fn main() -> Result<()> {
             for value in values.split(',').map(str::trim).filter(|v| !v.is_empty()) {
                 tx.execute(&format!("INSERT INTO {table}(name) VALUES (?1) ON CONFLICT(name) DO NOTHING"), [value])?;
                 let item: i64 = tx.query_row(&format!("SELECT id FROM {table} WHERE name=?1"), [value], |r| r.get(0))?;
-                tx.execute(&format!("INSERT OR IGNORE INTO {join}(story_id, {column}) VALUES (?1, ?2)"), params![id, item])?;
+                tx.execute(&format!("INSERT OR IGNORE INTO {join}(story_id, {column}, sample_key) VALUES (?1, ?2, ?3)"), params![id, item, sample_key(id as u64)])?;
             }
         }
         relations.push((line + 1, record.nearest));
@@ -81,6 +82,7 @@ fn main() -> Result<()> {
     }
     tx.execute("INSERT INTO stories_fts(stories_fts) VALUES('rebuild')", [])?;
     tx.commit()?;
+    conn.execute_batch("ANALYZE; PRAGMA optimize;")?;
     println!("Imported {} stories", ids.len());
     Ok(())
 }

@@ -3,9 +3,10 @@ use crate::db::stories::StoryRepository;
 use crate::models::search::{Pagination, SearchPageQuery};
 use crate::models::story::StorySummary;
 use crate::templates::views::category_index_template;
-use crate::utils::{current_epoch_millis, shuffle_slice_seeded};
+use crate::utils::{current_epoch_millis, sample_key};
 use actix_web::{get, web, HttpResponse, Responder};
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 
 async fn get_category_page(
     state: web::Data<AppState>,
@@ -19,37 +20,34 @@ async fn get_category_page(
     };
 
     let page = query.page.unwrap_or(1).max(1);
-    let page_size = 50;
+    let page_size = 100;
     let seed = query.seed.unwrap_or_else(current_epoch_millis);
     let name_clone = name.clone();
 
     let result = conn
     .interact(move |conn| -> Result<(usize, Vec<StorySummary>)> {
-        let id_query = if kind == "Tag" {
-            "SELECT st.story_id FROM story_tags st JOIN tags t ON st.tag_id = t.id WHERE t.name = ?1 LIMIT 500"
+        let (table, column, lookup) = if kind == "Tag" {
+            ("story_tags", "tag_id", "tags")
         } else {
-            "SELECT sk.story_id FROM story_keywords sk JOIN keywords k ON sk.keyword_id = k.id WHERE k.name = ?1 LIMIT 500"
+            ("story_keywords", "keyword_id", "keywords")
         };
-
-        let mut stmt = conn.prepare(id_query)?;
-        let mut ids: Vec<i64> = stmt
-        .query_map([&name_clone], |r| r.get(0))?
-        .filter_map(Result::ok)
-        .collect();
-
+        let lookup_sql = format!("SELECT id FROM {lookup} WHERE name = ?1 COLLATE NOCASE LIMIT 1");
+        let category_id: Option<i64> = conn.query_row(&lookup_sql, [&name_clone], |r| r.get(0)).optional()?;
+        let Some(category_id) = category_id else { return Ok((0, vec![])); };
+        let pivot = sample_key(seed as u64);
+        let mut ids = Vec::new();
+        for operator in [">=", "<"] {
+            let sql = format!("SELECT story_id FROM {table} WHERE {column} = ?1 AND sample_key {operator} ?2 ORDER BY sample_key, story_id LIMIT ?3");
+            let mut stmt = conn.prepare(&sql)?;
+            let remaining = 1001 - ids.len();
+            let rows = stmt.query_map(rusqlite::params![category_id, pivot, remaining as i64], |r| r.get::<_, i64>(0))?;
+            ids.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+            if ids.len() == 1001 { break; }
+        }
         let total_pool = ids.len();
-        if total_pool == 0 {
-            return Ok((0, vec![]));
-        }
-
-        shuffle_slice_seeded(&mut ids, (seed as u64) ^ 0x5DEECE66D);
-
-        let offset = (page - 1) * page_size;
-        if offset >= ids.len() {
-            return Ok((total_pool, vec![]));
-        }
-
-        let end = (offset + page_size).min(ids.len());
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
+        if offset >= total_pool.min(1000) { return Ok((total_pool, vec![])); }
+        let end = (offset + page_size).min(total_pool.min(1000));
         let page_ids = &ids[offset..end];
         let stories = StoryRepository::fetch_by_ids(conn, page_ids)?;
 
@@ -59,7 +57,7 @@ async fn get_category_page(
 
     match result {
         Ok(Ok((total_pool, stories))) => {
-            let total_pages = (total_pool + page_size - 1) / page_size;
+            let total_pages = (total_pool.min(1000) + page_size - 1) / page_size;
             let pagination = Pagination {
                 current_page: page,
                 total_pages: total_pages.max(1),

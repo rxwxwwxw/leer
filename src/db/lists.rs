@@ -79,22 +79,22 @@ impl ListRepository {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
-    pub fn add_story(conn: &Connection, list_id: i64, story_id: i64, notes: Option<&str>) -> Result<()> {
-        conn.execute(
+    pub fn add_story(conn: &Connection, list_id: i64, user_id: i64, story_id: i64, notes: Option<&str>) -> Result<bool> {
+        let changed = conn.execute(
             "INSERT INTO reading_list_items (list_id, story_id, notes)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(list_id, story_id) DO UPDATE SET notes = excluded.notes",
-                     params![list_id, story_id, notes],
+             SELECT id, ?3, ?4 FROM reading_lists WHERE id = ?1 AND user_id = ?2
+             ON CONFLICT(list_id, story_id) DO UPDATE SET notes = excluded.notes",
+            params![list_id, user_id, story_id, notes],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
-    pub fn remove_story(conn: &Connection, list_id: i64, story_id: i64) -> Result<()> {
-        conn.execute(
-            "DELETE FROM reading_list_items WHERE list_id = ?1 AND story_id = ?2",
-            params![list_id, story_id],
+    pub fn remove_story(conn: &Connection, list_id: i64, user_id: i64, story_id: i64) -> Result<bool> {
+        let changed = conn.execute(
+            "DELETE FROM reading_list_items WHERE list_id = ?1 AND story_id = ?2 AND EXISTS (SELECT 1 FROM reading_lists WHERE id = ?1 AND user_id = ?3)",
+            params![list_id, story_id, user_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn delete_list(conn: &Connection, list_id: i64, user_id: i64) -> Result<bool> {
@@ -103,5 +103,25 @@ impl ListRepository {
             params![list_id, user_id],
         )?;
         Ok(affected > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema::initialize_user_schema;
+
+    #[test]
+    fn only_list_owner_can_change_items() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        initialize_user_schema(&conn)?;
+        conn.execute("INSERT INTO users(username, password_hash) VALUES ('alice', 'x'), ('bob', 'x')", [])?;
+        let list = ListRepository::create_list(&conn, 1, "private", false)?;
+        assert!(!ListRepository::add_story(&conn, list, 2, 42, None)?);
+        assert!(ListRepository::add_story(&conn, list, 1, 42, None)?);
+        assert!(!ListRepository::remove_story(&conn, list, 2, 42)?);
+        assert_eq!(ListRepository::get_list_items(&conn, list)?.len(), 1);
+        assert!(ListRepository::remove_story(&conn, list, 1, 42)?);
+        Ok(())
     }
 }

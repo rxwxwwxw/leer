@@ -32,19 +32,9 @@ pub fn build_where_filters(
 ) -> String {
     let mut filters = Vec::new();
 
-    if !and_tags.is_empty() {
-        let placeholders = push_string_params(and_tags, params);
-        filters.push(format!(
-            "m.id IN (
-                SELECT st.story_id FROM story_tags st
-                JOIN tags t ON st.tag_id = t.id
-                WHERE t.name COLLATE NOCASE IN ({})
-                GROUP BY st.story_id
-                HAVING COUNT(DISTINCT t.id) = {}
-            )",
-            placeholders,
-            and_tags.len()
-        ));
+    for tag in and_tags {
+        let placeholder = push_string_params(std::slice::from_ref(tag), params);
+        filters.push(format!("m.id IN (SELECT st.story_id FROM tags t JOIN story_tags st ON st.tag_id = t.id WHERE t.name COLLATE NOCASE = {})", placeholder));
     }
 
     if !or_tags.is_empty() {
@@ -71,19 +61,9 @@ pub fn build_where_filters(
         ));
     }
 
-    if !inc_kws.is_empty() {
-        let placeholders = push_string_params(inc_kws, params);
-        filters.push(format!(
-            "m.id IN (
-                SELECT sk.story_id FROM story_keywords sk
-                JOIN keywords k ON sk.keyword_id = k.id
-                WHERE k.name COLLATE NOCASE IN ({})
-                GROUP BY sk.story_id
-                HAVING COUNT(DISTINCT k.id) = {}
-            )",
-            placeholders,
-            inc_kws.len()
-        ));
+    for keyword in inc_kws {
+        let placeholder = push_string_params(std::slice::from_ref(keyword), params);
+        filters.push(format!("m.id IN (SELECT sk.story_id FROM keywords k JOIN story_keywords sk ON sk.keyword_id = k.id WHERE k.name COLLATE NOCASE = {})", placeholder));
     }
 
     if !exc_kws.is_empty() {

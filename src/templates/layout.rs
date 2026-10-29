@@ -18,7 +18,6 @@ pub fn base_layout(
     let lists_url = format!("{}/lists", base_path);
     let logout_url = format!("{}/logout", base_path);
     let login_url = format!("{}/login", base_path);
-    let register_url = format!("{}/register", base_path);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -36,15 +35,14 @@ pub fn base_layout(
                         nav class="site-nav" aria-label="Primary navigation" {
                             a class="nav-link" href=(search_url) { "Search" }
                             a class="nav-link" href=(authors_url) { "Authors" }
-                            @if let Some(username) = current_user {
+                            @if current_user.is_some() || (title != "Login" && title != "Register") {
                                 a class="nav-link" href=(lists_url) { "My Lists" }
-                                span class="nav-user" { "Hello, " strong { (username) } }
+                                @if let Some(username) = current_user { span class="nav-user" { "Hello, " strong { (username) } } }
                                 form action=(logout_url) method="post" class="nav-form" {
                                     button type="submit" class="nav-button" { "Logout" }
                                 }
                             } @else {
                                 a class="nav-link" href=(login_url) { "Login" }
-                                a class="nav-link nav-link-emphasis" href=(register_url) { "Register" }
                             }
                         }
                     }

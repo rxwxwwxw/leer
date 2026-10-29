@@ -19,6 +19,7 @@ use NG_Reader::{
 #[actix_web::main]
 async fn main() -> Result<()> {
     // Load local .env file if it exists (silent fallback if missing in production environments)
+    let _ = dotenvy::from_filename(".env.local");
     let _ = dotenv();
 
 
@@ -37,8 +38,12 @@ async fn main() -> Result<()> {
 
     // 2. Secret key for encrypted session cookies
     // In local dev, fallback to a static string. In production, require or fetch a persistent secret key.
-    let secret_key_raw = env::var("SESSION_SECRET_KEY")
-    .unwrap_or_else(|_| "a_very_long_and_secure_random_string_for_dev_only_32_bytes_long_minimum".to_string());
+    let secret_key_raw = match env::var("SESSION_SECRET_KEY") {
+        Ok(secret) => secret,
+        Err(_) if !is_production => "a_very_long_and_secure_random_string_for_dev_only_32_bytes_long_minimum".to_string(),
+        Err(_) => anyhow::bail!("SESSION_SECRET_KEY must be set when APP_ENV=production"),
+    };
+    anyhow::ensure!(secret_key_raw.len() >= 64, "SESSION_SECRET_KEY must contain at least 64 bytes");
     let secret_key = Key::from(secret_key_raw.as_bytes());
 
     // 3. Read-Only stories.db pool
@@ -50,7 +55,16 @@ async fn main() -> Result<()> {
     let users_pool = users_cfg.create_pool(Runtime::Tokio1)?;
 
     let user_conn = users_pool.get().await?;
-    user_conn.interact(|conn| initialize_user_schema(conn)).await.unwrap()?;
+    let admin_username = env::var("ADMIN_USERNAME").ok();
+    let admin_password = env::var("ADMIN_PASSWORD").ok();
+    anyhow::ensure!(admin_username.is_some() == admin_password.is_some(), "Set both ADMIN_USERNAME and ADMIN_PASSWORD, or neither");
+    user_conn.interact(move |conn| -> Result<()> {
+        initialize_user_schema(conn)?;
+        if let (Some(username), Some(password)) = (admin_username, admin_password) {
+            NG_Reader::db::users::UserRepository::bootstrap_admin(conn, &username, &password)?;
+        }
+        Ok(())
+    }).await.map_err(|e| anyhow::anyhow!("user database initialization failed: {e}"))??;
 
     // 5. Initial context extraction
     let init_conn = stories_pool.get().await?;
@@ -96,12 +110,18 @@ async fn main() -> Result<()> {
                                    max_story_id,
     });
 
-    let static_path =format!("{}/static",base_path);
+
 
     HttpServer::new(move || {
         let base_scope = web::scope(&base_path)
-        .service(Files::new(&static_path, "./static").prefer_utf8(true))
-        .configure(routes::register);
+        .route("/static/css/styles.css", web::get().to(|| async {
+            actix_files::NamedFile::open_async("./static/css/styles.css").await
+        }))
+        .configure(routes::register_public)
+        .service(web::scope("")
+            .wrap(actix_web::middleware::from_fn(NG_Reader::auth_guard::require_login))
+            .service(Files::new("/static", "./static").prefer_utf8(true))
+            .configure(routes::register_protected));
 
         App::new()
         .wrap(IdentityMiddleware::default())

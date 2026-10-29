@@ -50,3 +50,11 @@ pub fn url(base_path: &str, path: &str) -> String {
         format!("{}/{}", clean_base, clean_path)
     }
 }
+
+/// Deterministic permutation used for indexed sampling and seed pivots.
+pub fn sample_key(value: u64) -> i64 {
+    let mut x = value.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    ((x ^ (x >> 31)) & i64::MAX as u64) as i64
+}

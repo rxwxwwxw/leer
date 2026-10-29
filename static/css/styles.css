@@ -1852,3 +1852,9 @@ summary:focus-visible {
         max-width: none;
     }
 }
+
+.keyword-match { background: #d4f5da; color: #155b27; border: 1px solid #23813b; }
+.keyword-different { background: #ffe1e1; color: #842525; border: 1px solid #b34545; }
+
+.story-snippet { margin-top: 0.75rem; padding-left: 0.75rem; border-left: 3px solid currentColor; }
+.story-snippet mark { padding: 0 0.1em; }

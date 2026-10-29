@@ -1,9 +1,11 @@
 // src/search/engine.rs
 use crate::app_state::AppState;
+use crate::db::stories::StoryRepository;
 use crate::models::search::{
     AuthorSearchResult, SearchPageQuery, SearchResultPayload, SearchScope, SearchSort,
 };
-use crate::models::story::StorySummary;
+use crate::models::story::{StorySummary, SnippetPart};
+use argon2::password_hash::{rand_core::OsRng, SaltString};
 use crate::search::builder::{build_where_filters, parse_csv};
 use anyhow::{anyhow, Result};
 use rusqlite::types::ToSql;
@@ -13,6 +15,8 @@ const PORTER_WEIGHT: f32 = 1.0;
 const TRIGRAM_WEIGHT: f32 = 0.45;
 const PROXIMITY_WEIGHT: f32 = 1.20;
 const PHRASE_WEIGHT: f32 = 1.40;
+const PAIR_PHRASE_WEIGHT: f32 = 0.45;
+const TRIPLE_PHRASE_WEIGHT: f32 = 0.80;
 const EXACT_TITLE_BONUS: f32 = 0.03;
 
 /// Turn user text into a conservative FTS5 query where every whitespace-delimited
@@ -35,6 +39,22 @@ fn sanitize_phrase(q: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!("\"{}\"", clean)
+}
+
+/// Ordered subphrases are bounded independently of query length and preserve stop words.
+fn overlapping_phrase_query(query: &str, size: usize) -> Option<String> {
+    let words: Vec<String> = query.split_whitespace()
+        .map(|word| word.replace('"', ""))
+        .filter(|word| !word.is_empty())
+        .collect();
+    // The full-phrase ranker already handles a query of exactly this length.
+    if words.len() <= size { return None; }
+    let mut seen = HashSet::new();
+    let phrases: Vec<String> = words.windows(size).take(12)
+        .map(|window| format!("\"{}\"", window.join(" ")))
+        .filter(|phrase| seen.insert(phrase.clone()))
+        .collect();
+    if phrases.is_empty() { None } else { Some(phrases.join(" OR ")) }
 }
 
 fn apply_scope(query: &str, scope: SearchScope) -> String {
@@ -122,7 +142,7 @@ pub fn build_proximity_boost_query(q: &str) -> Option<String> {
     (!clauses.is_empty()).then(|| clauses.join(" OR "))
 }
 
-fn max_score_for_scope(scope: SearchScope, has_proximity: bool, has_trigram: bool) -> f32 {
+fn max_score_for_scope(scope: SearchScope, has_proximity: bool, has_trigram: bool, has_pair: bool, has_triple: bool) -> f32 {
     let mut score = PORTER_WEIGHT / 61.0 + PHRASE_WEIGHT / 41.0;
     if has_trigram {
         score += TRIGRAM_WEIGHT / 21.0;
@@ -130,10 +150,47 @@ fn max_score_for_scope(scope: SearchScope, has_proximity: bool, has_trigram: boo
     if has_proximity {
         score += PROXIMITY_WEIGHT / 61.0;
     }
+    if has_pair { score += PAIR_PHRASE_WEIGHT / 61.0; }
+    if has_triple { score += TRIPLE_PHRASE_WEIGHT / 61.0; }
     if scope != SearchScope::Content {
         score += EXACT_TITLE_BONUS;
     }
     score
+}
+
+/// Split only the markers generated for this query; all text is escaped by Maud.
+fn split_snippet(value: &str, open: &str, close: &str) -> Option<Vec<SnippetPart>> {
+    let mut rest = value;
+    let mut parts = Vec::new();
+    let mut found = false;
+    while let Some(pos) = rest.find(open) {
+        let (prefix, after_open) = rest.split_at(pos);
+        let after_open = &after_open[open.len()..];
+        let Some(end) = after_open.find(close) else { return None; };
+        if !prefix.is_empty() { parts.push(SnippetPart { text: prefix.to_string(), matched: false }); }
+        parts.push(SnippetPart { text: after_open[..end].to_string(), matched: true });
+        found = true;
+        rest = &after_open[end + close.len()..];
+    }
+    if !rest.is_empty() { parts.push(SnippetPart { text: rest.to_string(), matched: false }); }
+    found.then_some(parts)
+}
+
+fn add_snippets(conn: &rusqlite::Connection, stories: &mut [StorySummary], query: &str) -> Result<()> {
+    let terms = query.split_whitespace().map(|t| t.replace('"', ""))
+        .filter(|t| !t.is_empty()).map(|t| format!("\"{}\"", t)).collect::<Vec<_>>();
+    if terms.is_empty() || stories.is_empty() { return Ok(()); }
+    let body_query = format!("content: ({})", terms.join(" OR "));
+    let nonce = SaltString::generate(&mut OsRng).to_string();
+    let open = format!("__snippet_{}_open__", nonce);
+    let close = format!("__snippet_{}_close__", nonce);
+    let mut stmt = conn.prepare("SELECT snippet(stories_fts, 2, ?2, ?3, '…', 30) FROM stories_fts WHERE stories_fts MATCH ?1 AND rowid = ?4")?;
+    use rusqlite::OptionalExtension;
+    for story in stories {
+        let excerpt: Option<String> = stmt.query_row(rusqlite::params![body_query, open, close, story.id], |r| r.get(0)).optional()?;
+        story.snippet = excerpt.and_then(|value| split_snippet(&value, &open, &close));
+    }
+    Ok(())
 }
 
 async fn execute_filter_only_search(
@@ -163,56 +220,20 @@ async fn execute_filter_only_search(
                 &mut sql_params,
             );
 
-            sql_params.push(Box::new(page_size as i64));
-            sql_params.push(Box::new(offset as i64));
-            let limit_idx = sql_params.len() - 1;
-            let offset_idx = sql_params.len();
-
             let order_by = match sort_order {
-                SearchSort::Relevance => "ORDER BY COALESCE(m.readers, 0) DESC, m.timestamp DESC",
-                SearchSort::Newest => "ORDER BY m.timestamp DESC",
-                SearchSort::Oldest => "ORDER BY m.timestamp ASC",
-                SearchSort::Title => "ORDER BY COALESCE(NULLIF(TRIM(m.title), ''), '(not title)') COLLATE NOCASE ASC",
+                SearchSort::Relevance => "ORDER BY COALESCE(m.readers, 0) DESC, m.timestamp DESC, m.id ASC",
+                SearchSort::Newest => "ORDER BY m.timestamp DESC, m.id ASC",
+                SearchSort::Oldest => "ORDER BY m.timestamp ASC, m.id ASC",
+                SearchSort::Title => "ORDER BY COALESCE(NULLIF(TRIM(m.title), ''), '(not title)') COLLATE NOCASE ASC, m.id ASC",
             };
-
-            let sql = format!(
-                r#"
-                SELECT m.id, m.title, a.name AS author, COALESCE(m.introduction, '') AS introduction,
-                       m.readers,
-                       strftime('%Y-%m-%d', datetime(m.timestamp, 'unixepoch')) AS date_str,
-                       (SELECT GROUP_CONCAT(t.name, ', ') FROM story_tags st JOIN tags t ON st.tag_id = t.id WHERE st.story_id = m.id) AS tags,
-                       (SELECT GROUP_CONCAT(k.name, ', ') FROM story_keywords sk JOIN keywords k ON sk.keyword_id = k.id WHERE sk.story_id = m.id) AS keywords,
-                       COUNT(*) OVER() AS total_results
-                FROM stories_metadata m
-                JOIN authors a ON m.author_id = a.id
-                {}
-                {}
-                LIMIT ?{} OFFSET ?{};
-                "#,
-                where_clause, order_by, limit_idx, offset_idx
-            );
-
+            let sql = format!("SELECT m.id FROM stories_metadata m {where_clause} {order_by} LIMIT 1001");
             let mut stmt = conn.prepare(&sql)?;
-            let mut total_matches = 0;
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(sql_params.iter().map(|b| b.as_ref())),
-                |r| {
-                    total_matches = r.get::<_, i64>(8).unwrap_or(0) as usize;
-                    Ok(StorySummary {
-                        id: r.get(0)?,
-                        title: r.get(1)?,
-                        author: r.get(2)?,
-                        introduction: r.get(3)?,
-                        score: None,
-                        readers: r.get(4)?,
-                        date: r.get(5)?,
-                        tags: r.get(6)?,
-                        keywords: r.get(7)?,
-                    })
-                },
-            )?;
-            let list = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok((list, total_matches))
+            let ids = stmt.query_map(rusqlite::params_from_iter(sql_params.iter().map(|b| b.as_ref())), |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let total = ids.len();
+            let start = offset.min(total.min(1000));
+            let end = start.saturating_add(page_size).min(total.min(1000));
+            let list = StoryRepository::fetch_by_ids(conn, &ids[start..end])?;
+            Ok((list, total))
         })
         .await
         .map_err(|e| anyhow!("DB error: {}", e))??;
@@ -229,7 +250,7 @@ pub async fn execute_search(
     let raw_q = query_params.query.as_deref().unwrap_or("").trim();
     let scope = query_params.scope.unwrap_or(SearchScope::All);
     let sort_order = query_params.sort.unwrap_or(SearchSort::Relevance);
-    let offset = (page.saturating_sub(1)) * page_size;
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
     let conn = state.stories_pool.get().await?;
 
     if scope == SearchScope::Author {
@@ -302,7 +323,7 @@ pub async fn execute_search(
             .await
             .map_err(|e| anyhow!("DB interaction failed: {}", e))??;
 
-        return Ok((SearchResultPayload::Authors(authors), total));
+        return Ok((SearchResultPayload::Authors(if offset >= 1000 { vec![] } else { authors }), total.min(1001)));
     }
 
     if raw_q.is_empty() {
@@ -311,10 +332,15 @@ pub async fn execute_search(
 
     let fts_query = apply_scope(&sanitize_fts(raw_q), scope);
     let phrase_query = apply_scope(&sanitize_phrase(raw_q), scope);
+    let pair_phrase_query = overlapping_phrase_query(raw_q, 2).map(|q| apply_scope(&q, scope));
+    let triple_phrase_query = overlapping_phrase_query(raw_q, 3).map(|q| apply_scope(&q, scope));
+    let has_pair_phrase = pair_phrase_query.is_some();
+    let has_triple_phrase = triple_phrase_query.is_some();
     let trigram_query = build_trigram_query(raw_q, scope);
     let proximity_query = build_proximity_boost_query(raw_q).map(|q| apply_scope(&q, scope));
     let has_proximity = proximity_query.is_some();
     let raw_query_for_bonus = raw_q.to_string();
+    let snippet_query = raw_q.to_string();
 
     let and_tags = parse_csv(query_params.and_tags.as_deref());
     let or_tags = parse_csv(query_params.or_tags.as_deref());
@@ -323,7 +349,7 @@ pub async fn execute_search(
     let exc_kws = parse_csv(query_params.exc_kws.as_deref());
 
     let use_trigram = scope != SearchScope::Content && trigram_query.is_some();
-    let max_score = max_score_for_scope(scope, has_proximity, use_trigram);
+    let max_score = max_score_for_scope(scope, has_proximity, use_trigram, has_pair_phrase, has_triple_phrase);
     let use_title_bonus = scope != SearchScope::Content;
 
     let (results, total) = conn
@@ -331,10 +357,11 @@ pub async fn execute_search(
             let mut sql_params: Vec<Box<dyn ToSql>> = vec![
                 Box::new(fts_query),
                 Box::new(trigram_query.unwrap_or_else(|| "\"__no_trigram__\"".to_string())),
-                Box::new(0_i64),
+                Box::new(pair_phrase_query.unwrap_or_else(|| "\"__no_pair_phrase__\"".to_string())),
                 Box::new(proximity_query.unwrap_or_else(|| "\"__no_proximity__\"".to_string())),
                 Box::new(raw_query_for_bonus),
                 Box::new(phrase_query),
+                Box::new(triple_phrase_query.unwrap_or_else(|| "\"__no_triple_phrase__\"".to_string())),
             ];
 
             // Positive tag gates are applied before each ranker's LIMIT so each
@@ -354,8 +381,8 @@ pub async fn execute_search(
                 String::new()
             };
             let where_clause = build_where_filters(
-                &and_tags,
-                &or_tags,
+                &[],
+                &[],
                 &exc_tags,
                 &inc_kws,
                 &exc_kws,
@@ -364,12 +391,13 @@ pub async fn execute_search(
 
             let tag_pool_cte = if has_positive_tag_gate {
                 format!(
-                    "tag_pool AS (SELECT m.id AS story_id FROM stories_metadata m {}),",
+                    "tag_pool AS MATERIALIZED (SELECT m.id AS story_id FROM stories_metadata m {}),",
                     tag_gate_where
                 )
             } else {
                 String::new()
             };
+            let final_pool_join = if has_positive_tag_gate { "JOIN tag_pool tp ON tp.story_id = m.id" } else { "" };
             let fts_pool_join = if has_positive_tag_gate {
                 "JOIN tag_pool tp ON tp.story_id = stories_fts.rowid"
             } else {
@@ -398,16 +426,21 @@ pub async fn execute_search(
                 "SELECT NULL AS story_id WHERE 0".to_string()
             };
 
-            sql_params.push(Box::new(page_size as i64));
-            sql_params.push(Box::new(offset as i64));
-            let limit_idx = sql_params.len() - 1;
-            let offset_idx = sql_params.len();
+            let phrase_subquery = |enabled: bool, parameter: usize| {
+                if enabled {
+                    format!("SELECT stories_fts.rowid AS story_id FROM stories_fts {} WHERE stories_fts MATCH ?{} ORDER BY bm25(stories_fts, 14.0, 5.0, 1.0) LIMIT 500", fts_pool_join, parameter)
+                } else {
+                    format!("SELECT NULL AS story_id WHERE ?{} IS NULL AND 0", parameter)
+                }
+            };
+            let pair_phrase_cte = phrase_subquery(has_pair_phrase, 3);
+            let triple_phrase_cte = phrase_subquery(has_triple_phrase, 7);
 
             let order_by = match sort_order {
-                SearchSort::Relevance => "ORDER BY final_score DESC, COALESCE(readers, 0) DESC",
-                SearchSort::Newest => "ORDER BY timestamp DESC",
-                SearchSort::Oldest => "ORDER BY timestamp ASC",
-                SearchSort::Title => "ORDER BY COALESCE(NULLIF(TRIM(title), ''), '(not title)') COLLATE NOCASE ASC",
+                SearchSort::Relevance => "ORDER BY final_score DESC, COALESCE(readers, 0) DESC, id ASC",
+                SearchSort::Newest => "ORDER BY timestamp DESC, id ASC",
+                SearchSort::Oldest => "ORDER BY timestamp ASC, id ASC",
+                SearchSort::Title => "ORDER BY COALESCE(NULLIF(TRIM(title), ''), '(not title)') COLLATE NOCASE ASC, id ASC",
             };
 
             let title_bonus_sql = if use_title_bonus {
@@ -458,6 +491,18 @@ pub async fn execute_search(
                 phrase_candidates AS (
                     SELECT story_id, ROW_NUMBER() OVER () AS rank_num FROM phrase_raw
                 ),
+                pair_phrase_raw AS (
+                    {pair_phrase_cte}
+                ),
+                pair_phrase_candidates AS (
+                    SELECT story_id, ROW_NUMBER() OVER () AS rank_num FROM pair_phrase_raw
+                ),
+                triple_phrase_raw AS (
+                    {triple_phrase_cte}
+                ),
+                triple_phrase_candidates AS (
+                    SELECT story_id, ROW_NUMBER() OVER () AS rank_num FROM triple_phrase_raw
+                ),
                 combined_scores AS (
                     SELECT story_id, ({porter_weight} / (60.0 + rank_num)) AS score FROM porter_candidates
                     UNION ALL
@@ -466,6 +511,10 @@ pub async fn execute_search(
                     SELECT story_id, ({proximity_weight} / (60.0 + rank_num)) AS score FROM proximity_candidates
                     UNION ALL
                     SELECT story_id, ({phrase_weight} / (40.0 + rank_num)) AS score FROM phrase_candidates
+                    UNION ALL
+                    SELECT story_id, ({pair_phrase_weight} / (60.0 + rank_num)) AS score FROM pair_phrase_candidates
+                    UNION ALL
+                    SELECT story_id, ({triple_phrase_weight} / (60.0 + rank_num)) AS score FROM triple_phrase_candidates
                 ),
                 aggregated AS (
                     SELECT cs.story_id, SUM(cs.score) + {title_bonus_sql} AS final_score
@@ -474,55 +523,99 @@ pub async fn execute_search(
                     GROUP BY cs.story_id
                 ),
                 filtered_matches AS (
-                    SELECT m.id, m.title, a.name AS author, COALESCE(m.introduction, '') AS introduction,
-                           agg.final_score, m.readers, m.timestamp,
-                           strftime('%Y-%m-%d', datetime(m.timestamp, 'unixepoch')) AS date_str,
-                           (SELECT GROUP_CONCAT(t.name, ', ') FROM story_tags st JOIN tags t ON st.tag_id = t.id WHERE st.story_id = m.id) AS tags,
-                           (SELECT GROUP_CONCAT(k.name, ', ') FROM story_keywords sk JOIN keywords k ON sk.keyword_id = k.id WHERE sk.story_id = m.id) AS keywords,
-                           COUNT(*) OVER() AS total_results
+                    SELECT m.id, m.title, m.readers, m.timestamp, agg.final_score
                     FROM aggregated agg
                     JOIN stories_metadata m ON agg.story_id = m.id
-                    JOIN authors a ON m.author_id = a.id
+                    {final_pool_join}
                     {where_clause}
                 )
-                SELECT id, title, author, introduction, final_score, readers, timestamp,
-                       date_str, tags, keywords, total_results
-                FROM filtered_matches
+                SELECT id, final_score FROM filtered_matches
                 {order_by}
-                LIMIT ?{limit_idx} OFFSET ?{offset_idx};
+                LIMIT 1001;
                 "#,
                 porter_weight = PORTER_WEIGHT,
                 trigram_weight = TRIGRAM_WEIGHT,
                 proximity_weight = PROXIMITY_WEIGHT,
                 phrase_weight = PHRASE_WEIGHT,
+                pair_phrase_weight = PAIR_PHRASE_WEIGHT,
+                triple_phrase_weight = TRIPLE_PHRASE_WEIGHT,
             );
 
             let mut stmt = conn.prepare(&sql)?;
-            let mut total_matches = 0;
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(sql_params.iter().map(|b| b.as_ref())),
-                |r| {
-                    total_matches = r.get::<_, i64>(10).unwrap_or(0) as usize;
-                    let raw_score: f32 = r.get(4)?;
-                    let scaled_score = Some((raw_score / max_score).clamp(0.0, 1.0));
-                    Ok(StorySummary {
-                        id: r.get(0)?,
-                        title: r.get(1)?,
-                        author: r.get(2)?,
-                        introduction: r.get(3)?,
-                        score: scaled_score,
-                        readers: r.get(5)?,
-                        date: r.get(7)?,
-                        tags: r.get(8)?,
-                        keywords: r.get(9)?,
-                    })
-                },
-            )?;
-            let list = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(sql_params.iter().map(|b| b.as_ref())), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f32>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let total_matches = rows.len();
+            let start = offset.min(total_matches.min(1000));
+            let end = start.saturating_add(page_size).min(total_matches.min(1000));
+            let page_rows = &rows[start..end];
+            let ids: Vec<i64> = page_rows.iter().map(|(id, _)| *id).collect();
+            let scores: std::collections::HashMap<i64, f32> = page_rows.iter().copied().collect();
+            let mut list = StoryRepository::fetch_by_ids(conn, &ids)?;
+            for story in &mut list { story.score = scores.get(&story.id).map(|score| (score / max_score).clamp(0.0, 1.0)); }
+            add_snippets(conn, &mut list, &snippet_query)?;
             Ok((list, total_matches))
         })
         .await
         .map_err(|e| anyhow!("DB error: {}", e))??;
 
     Ok((SearchResultPayload::Stories(results), total))
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::*;
+    use crate::{db::schema::initialize_schema, templates::components::story_card};
+
+    #[test]
+    fn content_snippets_are_scoped_stemmed_and_safely_rendered() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        initialize_schema(&conn)?;
+        conn.execute_batch("INSERT INTO authors(id,name) VALUES (1,'Author');
+            INSERT INTO stories_metadata(id,line_index,author_id,title) VALUES (1,0,1,'Other'),(2,1,1,'Running');
+            INSERT INTO stories_content(story_id,content) VALUES (1,'Before <script> running through the forest &amp; beyond.'),(2,'A quiet afternoon.');
+            INSERT INTO stories_fts(stories_fts) VALUES ('rebuild');")?;
+        let mut stories = StoryRepository::fetch_by_ids(&conn, &[1, 2])?;
+        add_snippets(&conn, &mut stories, "run")?;
+        let snippet = stories[0].snippet.as_ref().unwrap();
+        assert!(snippet.iter().any(|part| part.matched && part.text == "running"));
+        assert!(stories[1].snippet.is_none());
+        let html = story_card("", &stories[0]).into_string();
+        assert!(html.contains("<mark>running</mark>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+        add_snippets(&conn, &mut stories, "forest absent")?;
+        assert!(stories[0].snippet.as_ref().unwrap().iter().any(|part| part.matched && part.text == "forest"));
+        assert!(stories[1].snippet.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn marker_parser_rejects_unfinished_markers() {
+        assert!(split_snippet("before OPENbroken", "OPEN", "CLOSE").is_none());
+        assert!(split_snippet("unmatched text", "OPEN", "CLOSE").is_none());
+    }
+}
+
+#[cfg(test)]
+mod phrase_tests {
+    use super::*;
+    #[test]
+    fn generates_ordered_overlapping_phrases_with_bounded_size() {
+        let q = "time traveling gray wizard";
+        assert_eq!(overlapping_phrase_query(q, 2).as_deref(), Some("\"time traveling\" OR \"traveling gray\" OR \"gray wizard\""));
+        assert_eq!(overlapping_phrase_query(q, 3).as_deref(), Some("\"time traveling gray\" OR \"traveling gray wizard\""));
+        assert!(overlapping_phrase_query("time travel", 2).is_none());
+        assert_eq!(overlapping_phrase_query("a a a a", 2).unwrap(), "\"a a\"");
+        let long_query = (0..100).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" ");
+        assert_eq!(overlapping_phrase_query(&long_query, 2).unwrap().split(" OR ").count(), 12);
+    }
+    #[test]
+    fn sqlite_phrases_use_stemming_and_keep_word_order() -> Result<()> {
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch("CREATE VIRTUAL TABLE f USING fts5(text, tokenize='porter unicode61'); INSERT INTO f VALUES ('time travel'), ('traveling gray wizard'), ('travel time'), ('wizard gray traveling');")?;
+        let q = overlapping_phrase_query("time traveling gray wizard", 2).unwrap();
+        let mut stmt = db.prepare("SELECT text FROM f WHERE f MATCH ?1 ORDER BY rowid")?;
+        let rows = stmt.query_map([q], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows, vec!["time travel", "traveling gray wizard"]);
+        Ok(())
+    }
 }

@@ -33,12 +33,12 @@ pub async fn get_lists(state: web::Data<AppState>, identity: Option<Identity>) -
         Err(_) => return HttpResponse::InternalServerError().body("DB connection error"),
     };
     let lists_res = u_conn
-    .interact(move |conn| ListRepository::get_user_lists(conn, user_id))
+    .interact(move |conn| -> Result<_> { Ok((ListRepository::get_user_lists(conn, user_id)?, crate::db::users::UserRepository::is_admin(conn, user_id)?)) })
     .await;
 
     match lists_res {
-        Ok(Ok(lists)) => {
-            let markup = reading_lists_page_template(&state.base_path, &lists, &state.popular_tags);
+        Ok(Ok((lists, is_admin))) => {
+            let markup = reading_lists_page_template(&state.base_path, &lists, &state.popular_tags, is_admin);
             HttpResponse::Ok().content_type("text/html; charset=utf-8").body(markup.into_string())
         }
         _ => HttpResponse::InternalServerError().body("Failed to load lists"),
@@ -78,7 +78,9 @@ pub async fn create_list(
 pub async fn get_list_detail(
     state: web::Data<AppState>,
     path: web::Path<i64>,
+    identity: Option<Identity>,
 ) -> impl Responder {
+    let user_id = match get_authenticated_user_id(&state.base_path, identity) { Ok(id) => id, Err(response) => return response };
     let list_id = path.into_inner();
     let u_conn = match state.users_pool.get().await {
         Ok(c) => c,
@@ -88,6 +90,7 @@ pub async fn get_list_detail(
     let list_data = u_conn
     .interact(move |conn| -> Result<_> {
         let meta = ListRepository::get_list(conn, list_id)?;
+        if !meta.as_ref().is_some_and(|list| list.is_public || list.user_id == user_id) { return Ok((None, vec![])); }
         let raw_items = ListRepository::get_list_items(conn, list_id)?;
         Ok((meta, raw_items))
     })
@@ -133,7 +136,9 @@ pub async fn add_item_to_list(
     state: web::Data<AppState>,
     path: web::Path<i64>,
     form: web::Form<AddToListForm>,
+    identity: Option<Identity>,
 ) -> impl Responder {
+    let user_id = match get_authenticated_user_id(&state.base_path, identity) { Ok(id) => id, Err(response) => return response };
     let list_id = path.into_inner();
     let u_conn = match state.users_pool.get().await {
         Ok(c) => c,
@@ -143,13 +148,14 @@ pub async fn add_item_to_list(
     let notes = form.notes.clone();
 
     let res = u_conn
-    .interact(move |conn| ListRepository::add_story(conn, list_id, story_id, notes.as_deref()))
+    .interact(move |conn| ListRepository::add_story(conn, list_id, user_id, story_id, notes.as_deref()))
     .await;
 
     match res {
-        Ok(Ok(_)) => HttpResponse::SeeOther()
+        Ok(Ok(true)) => HttpResponse::SeeOther()
         .insert_header(("Location", url(&state.base_path, &format!("/lists/{}", list_id))))
         .finish(),
+        Ok(Ok(false)) => HttpResponse::NotFound().finish(),
         _ => HttpResponse::InternalServerError().body("Failed to add story to list"),
     }
 }
@@ -158,7 +164,9 @@ pub async fn add_item_to_list(
 pub async fn remove_item_from_list(
     state: web::Data<AppState>,
     path: web::Path<(i64, i64)>,
+    identity: Option<Identity>,
 ) -> impl Responder {
+    let user_id = match get_authenticated_user_id(&state.base_path, identity) { Ok(id) => id, Err(response) => return response };
     let (list_id, story_id) = path.into_inner();
     let u_conn = match state.users_pool.get().await {
         Ok(c) => c,
@@ -166,13 +174,14 @@ pub async fn remove_item_from_list(
     };
 
     let res = u_conn
-    .interact(move |conn| ListRepository::remove_story(conn, list_id, story_id))
+    .interact(move |conn| ListRepository::remove_story(conn, list_id, user_id, story_id))
     .await;
 
     match res {
-        Ok(Ok(_)) => HttpResponse::SeeOther()
+        Ok(Ok(true)) => HttpResponse::SeeOther()
         .insert_header(("Location", url(&state.base_path, &format!("/lists/{}", list_id))))
         .finish(),
+        Ok(Ok(false)) => HttpResponse::NotFound().finish(),
         _ => HttpResponse::InternalServerError().body("Failed to remove item"),
     }
 }

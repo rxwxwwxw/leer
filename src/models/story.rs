@@ -18,12 +18,19 @@ pub struct TagCount {
     pub count: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnippetPart {
+    pub text: String,
+    pub matched: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct StorySummary {
     pub id: i64,
     pub title: String,
     pub author: String,
     pub score: Option<f32>,
+    pub snippet: Option<Vec<SnippetPart>>,
     pub readers: Option<i64>,
     pub date: Option<String>,
     pub tags: Option<String>,

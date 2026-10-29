@@ -27,11 +27,11 @@ pub async fn search_page(
     }
 
     let page = query.page.unwrap_or(1).max(1);
-    let page_size = 25;
+    let page_size = 100;
 
     match execute_search(&state, &query, page, page_size).await {
         Ok((payload, total_count)) => {
-            let total_pages = (total_count + page_size - 1) / page_size;
+            let total_pages = (total_count.min(1000) + page_size - 1) / page_size;
             let pagination = Pagination {
                 current_page: page,
                 total_pages: total_pages.max(1),

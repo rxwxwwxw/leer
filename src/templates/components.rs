@@ -2,7 +2,7 @@ use crate::models::search::Pagination;
 use crate::models::story::{display_story_title, StorySummary, TagCount};
 use maud::{html, Markup};
 
-pub fn related_story_card(base_path: &str, story: &StorySummary) -> Markup {
+pub fn related_story_card(base_path: &str, story: &StorySummary, current_keywords: &std::collections::HashSet<String>) -> Markup {
     let author_encoded = urlencoding::encode(&story.author);
     let display_title = display_story_title(&story.title);
     html! {
@@ -29,8 +29,9 @@ pub fn related_story_card(base_path: &str, story: &StorySummary) -> Markup {
             }
             @if let Some(keywords) = &story.keywords {
                 div class="pills-container" {
-                    @for kw in keywords.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).take(3) {
-                        a class="kw-pill" href=(format!("{}/keyword/{}", base_path, urlencoding::encode(kw))) { (kw) }
+                    @for kw in keywords.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        @let matched = current_keywords.contains(&kw.to_lowercase());
+                        a class=(if matched { "kw-pill keyword-match" } else { "kw-pill keyword-different" }) aria-label=(format!("{}: {}", if matched { "Matching keyword" } else { "Different keyword" }, kw)) href=(format!("{}/keyword/{}", base_path, urlencoding::encode(kw))) { (kw) }
                     }
                 }
             }
@@ -43,7 +44,8 @@ pub fn related_story_card(base_path: &str, story: &StorySummary) -> Markup {
     }
 }
 
-pub fn related_stories_section(base_path: &str, related: &[StorySummary]) -> Markup {
+pub fn related_stories_section(base_path: &str, related: &[StorySummary], keywords: Option<&str>) -> Markup {
+    let current_keywords: std::collections::HashSet<String> = keywords.unwrap_or("").split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
     if related.is_empty() {
         return html! {};
     }
@@ -52,13 +54,13 @@ pub fn related_stories_section(base_path: &str, related: &[StorySummary]) -> Mar
             div class="related-section-heading" {
                 div {
                     h2 id="related-stories-heading" { "Related Stories" }
-                    p { "Nearby stories, listed alphabetically for easier scanning." }
+                    p { "Nearby stories, listed alphabetically. Green keywords match; red keywords differ." }
                 }
                 span class="count-badge" { (related.len()) }
             }
             ul class="related-list related-list-grid" {
                 @for story in related {
-                    (related_story_card(base_path, story))
+                    (related_story_card(base_path, story, &current_keywords))
                 }
             }
         }
@@ -150,6 +152,13 @@ pub fn story_card(base_path: &str, story: &StorySummary) -> Markup {
                     p class="story-intro" { (intro) }
                 }
             }
+            @if let Some(snippet) = &story.snippet {
+                p class="story-snippet" {
+                    @for part in snippet {
+                        @if part.matched { mark { (&part.text) } } @else { (&part.text) }
+                    }
+                }
+            }
         }
     }
 }
@@ -175,5 +184,21 @@ pub fn pagination_nav(base_path: &str, query_params: &str, pag: &Pagination) -> 
                 a class="pagination-link" href=(format!("{}page={}", prefix, pag.total_pages)) { "Last »" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn related_keywords_are_all_shown_and_classified() {
+        let story = StorySummary { id: 2, title: "Related".into(), author: "Author".into(), score: Some(0.5), snippet: None, readers: None, date: None, tags: None, keywords: Some(" shared , Other, <unsafe>, fourth".into()), introduction: None };
+        let html = related_stories_section("", &[story], Some("Shared, Another")).into_string();
+        assert!(html.contains("keyword-match"));
+        assert_eq!(html.matches("keyword-different").count(), 3);
+        assert!(html.contains("Matching keyword: shared"));
+        assert!(html.contains("&lt;unsafe&gt;"));
+        assert!(html.contains("fourth"));
     }
 }

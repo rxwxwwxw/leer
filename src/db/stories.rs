@@ -30,6 +30,7 @@ impl StoryRepository {
                author: r.get(2)?,
                introduction: r.get(3)?,
                score: None,
+               snippet: None,
                readers: r.get(4)?,
                date: r.get(5)?,
                tags: r.get(6)?,

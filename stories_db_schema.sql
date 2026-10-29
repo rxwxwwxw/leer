@@ -29,11 +29,13 @@ CREATE TABLE stories_content(
 CREATE TABLE story_tags(
   story_id INTEGER NOT NULL,
   tag_id INTEGER NOT NULL,
+  sample_key INTEGER NOT NULL,
   PRIMARY KEY(story_id, tag_id)
 );
 CREATE TABLE story_keywords(
   story_id INTEGER NOT NULL,
   keyword_id INTEGER NOT NULL,
+  sample_key INTEGER NOT NULL,
   PRIMARY KEY(story_id, keyword_id)
 );
 CREATE VIEW stories_view AS
@@ -94,6 +96,10 @@ CREATE TABLE story_related (
   position INTEGER NOT NULL,
   PRIMARY KEY(story_id, related_id)
 );
-CREATE INDEX idx_story_tags_tag_id ON story_tags(tag_id);
-CREATE INDEX idx_story_keywords_kw_id ON story_keywords(keyword_id);
+CREATE INDEX idx_story_tags_tag_id ON story_tags(tag_id, story_id);
+CREATE INDEX idx_story_keywords_kw_id ON story_keywords(keyword_id, story_id);
 CREATE INDEX idx_stories_metadata_author ON stories_metadata(author_id);
+
+CREATE INDEX idx_story_tags_sample ON story_tags(tag_id, sample_key, story_id);
+CREATE INDEX idx_story_keywords_sample ON story_keywords(keyword_id, sample_key, story_id);
+CREATE INDEX idx_stories_title_sort ON stories_metadata(COALESCE(NULLIF(TRIM(title), ''), '(not title)') COLLATE NOCASE, id);

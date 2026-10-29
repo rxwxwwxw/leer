@@ -9,7 +9,7 @@ use crate::models::story::{
 use crate::utils::url;
 use maud::{html, Markup, PreEscaped};
 
-pub fn reading_lists_page_template(base_path: &str, lists: &[ReadingList], tags: &[TagCount]) -> Markup {
+pub fn reading_lists_page_template(base_path: &str, lists: &[ReadingList], tags: &[TagCount], is_admin: bool) -> Markup {
     let section_header = html! {
         div class="page-title-block" {
             h2 { "Your Reading Lists" }
@@ -17,6 +17,7 @@ pub fn reading_lists_page_template(base_path: &str, lists: &[ReadingList], tags:
         }
     };
     let content = html! {
+        @if is_admin { p { a href=(url(base_path, "/admin/users")) { "Manage users" } } }
         div class="create-list-box" {
             h3 { "Create New List" }
             form class="create-list-form" action=(url(base_path, "/lists")) method="post" {
@@ -406,7 +407,7 @@ pub fn search_results_template(
                 div {
                     h2 { "Authors" }
                     p class="results-summary" {
-                        (total_count) " " (result_label)
+                        (if total_count > 1000 { "1,000+".to_string() } else { total_count.to_string() }) " " (result_label)
                         @if !query_text.is_empty() { " matching “" (query_text) "”" }
                     }
                 }
@@ -436,7 +437,7 @@ pub fn search_results_template(
                 div {
                     h2 { "Stories" }
                     p class="results-summary" {
-                        (total_count) " " (result_label)
+                        (if total_count > 1000 { "1,000+".to_string() } else { total_count.to_string() }) " " (result_label)
                         @if !query_text.is_empty() { " matching “" (query_text) "”" }
                     }
                 }
@@ -541,7 +542,7 @@ pub fn category_index_template(
     let section_header = html! {
         div class="page-title-block" {
             h2 { (kind) ": #" (name) }
-            span class="count-badge" { (total_in_pool) " stories sampled" }
+            span class="count-badge" { (if total_in_pool > 1000 { "1,000+".to_string() } else { total_in_pool.to_string() }) " stories matching; up to 1,000 sampled" }
         }
     };
     let content = html! {
@@ -597,8 +598,9 @@ pub fn story_detail_template(
                         " • Published " (story.datetime)
                     }
                 }
-                a href=(toggle_url) class="toggle-raw-btn" {
-                    (toggle_label)
+                div {
+                    a href=(toggle_url) class="toggle-raw-btn" { (toggle_label) }
+                    a href=(url(base_path, &format!("/story/{}/epub", story.id))) class="toggle-raw-btn" { "Download EPUB" }
                 }
             }
             div class="story-meta-stats" {
@@ -659,7 +661,7 @@ pub fn story_detail_template(
     let related_section = if related.is_empty() {
         None
     } else {
-        Some(related_stories_section(base_path, related))
+        Some(related_stories_section(base_path, related, story.keywords.as_deref()))
     };
     base_layout(
         base_path,
@@ -833,7 +835,7 @@ pub fn authors_index_template(
     )
 }
 
-pub fn login_page_template(base_path: &str, error: Option<&str>, tags: &[TagCount]) -> Markup {
+pub fn login_page_template(base_path: &str, error: Option<&str>) -> Markup {
     let section_header = html! {
         div class="page-title-block" {
             h2 { "Sign In" }
@@ -858,47 +860,37 @@ pub fn login_page_template(base_path: &str, error: Option<&str>, tags: &[TagCoun
                 }
                 button type="submit" class="search-button auth-btn-submit" { "Sign In" }
             }
-            p class="auth-footer-text" {
-                "Don't have an account? " a href=(url(base_path, "/register")) { "Register here" }
-            }
+            p class="auth-footer-text" { "Contact an administrator for an account." }
         }
     };
-    base_layout(base_path, "Login", None, None, section_header, content, Some(tag_sidebar(base_path, tags)), None, None)
+    html! {
+        (maud::DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="UTF-8";
+                meta name="viewport" content="width=device-width, initial-scale=1.0";
+                meta name="color-scheme" content="light dark";
+                title { "Sign In" }
+                link rel="stylesheet" href=(url(base_path, "/static/css/styles.css"));
+            }
+            body { main class="container" { (section_header) (content) } }
+        }
+    }
 }
 
-pub fn register_page_template(base_path: &str, error: Option<&str>, tags: &[TagCount]) -> Markup {
-    let section_header = html! {
-        div class="page-title-block" {
-            h2 { "Create Account" }
-            p class="subtitle" { "Register to create personalized story reading lists." }
-        }
-    };
-    let content = html! {
-        div class="auth-card-container" {
-            @if let Some(err) = error {
-                div class="auth-error-alert" {
-                    (err)
-                }
-            }
-            form action=(url(base_path, "/register")) method="post" class="auth-form-layout" {
-                label class="auth-input-group" {
-                    "Username"
-                    input type="text" name="username" required autofocus minlength="3" maxlength="32";
-                }
-                label class="auth-input-group" {
-                    "Password"
-                    input type="password" name="password" required minlength="8";
-                }
-                label class="auth-input-group" {
-                    "Confirm Password"
-                    input type="password" name="confirm_password" required minlength="8";
-                }
-                button type="submit" class="search-button auth-btn-submit" { "Register" }
-            }
-            p class="auth-footer-text" {
-                "Already have an account? " a href=(url(base_path, "/login")) { "Sign in here" }
+#[cfg(test)]
+mod login_tests {
+    use super::login_page_template;
+
+    #[test]
+    fn login_does_not_expose_browsing_or_tag_links() {
+        for error in [None, Some("Invalid username or password.")] {
+            let html = login_page_template("/device2", error).into_string();
+            assert!(html.contains("/device2/login"));
+            assert!(html.contains("/device2/static/css/styles.css"));
+            for forbidden in ["Popular Tags", "/search", "/authors", "/tag/", "/story/"] {
+                assert!(!html.contains(forbidden), "unexpected {forbidden}");
             }
         }
-    };
-    base_layout(base_path, "Register", None, None, section_header, content, Some(tag_sidebar(base_path, tags)), None, None)
+    }
 }
